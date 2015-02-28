@@ -40,7 +40,8 @@ FLAGS = {
         0x00040000: "tfClearNoRipple",
         0x00100000: "tfSetFreeze",
         0x00200000: "tfClearFreeze"
-    }
+    },
+    "SetFee": {}
 }
 
 PATHSTEP_RIPPLING = 0x01
@@ -83,23 +84,40 @@ def splain(tx_json):
     print(dumpjson(tx_json))
     msg += "\n\n"
     
+    ledger = lookup_ledger(ledger_index=tx_json["ledger_index"])
     tx_type = tx_json["TransactionType"]
+    
+    #lookup flags now so we can phrase things accordingly
+    enabled_flags = []
+    if "Flags" in tx_json:
+        for flag_bit,flag_name in FLAGS["*"].items():
+            if tx_json["Flags"] & flag_bit:
+                enabled_flags.append(flag_name)
+        for flag_bit,flag_name in FLAGS[tx_type].items():
+            if tx_json["Flags"] & flag_bit:
+                enabled_flags.append(flag_name)
+    
     if tx_type == "Payment":
         msg += "This is a Payment from %s to %s.\n" % (lookup_acct(tx_json["Account"]),
-                 lookup_acct(tx_json["Destination"]))
+                lookup_acct(tx_json["Destination"]))
+    elif tx_type == "OfferCreate":
+        if "tfSell" in enabled_flags:
+            msg += "This is an OfferCreate, where %s offered to pay %s in order to receive at least %s.\n" % (
+                    lookup_acct(tx_json["Account"]), amount_to_string(tx_json["TakerGets"]),
+                    amount_to_string(tx_json["TakerPays"]) )
+        else:
+            msg += "This is an OfferCreate, where %s offered to pay up to %s in order to receive %s.\n" % (
+                    lookup_acct(tx_json["Account"]), amount_to_string(tx_json["TakerGets"]),
+                    amount_to_string(tx_json["TakerPays"]) )
+        if "OfferSequence" in tx_json:
+            msg += "Additionally, it was intended to cancel a previous offer with sequence #%d.\n" % tx_json["OfferSequence"]
+    elif tx_type == "SetFee":
+        msg += "This is a SetFee pseudo-transaction.\n"
     else:
         msg += "This is a %s transaction.\n" % tx_type
         msg += "The transaction was sent by %s.\n" % lookup_acct(tx_json["Account"])
     
     tx_meta = tx_json["meta"]#"tx-command" format
-    
-    enabled_flags = []
-    for flag_bit,flag_name in FLAGS["*"].items():
-        if tx_json["Flags"] & flag_bit:
-            enabled_flags.append(flag_name)
-    for flag_bit,flag_name in FLAGS[tx_type].items():
-        if tx_json["Flags"] & flag_bit:
-            enabled_flags.append(flag_name)
     
     if enabled_flags:
         msg += "The transaction specified the following flags: %s.\n" % ", ".join(enabled_flags)
@@ -118,7 +136,8 @@ def splain(tx_json):
     else:
         validated = False
     if validated:
-        msg += "This result has been validated by consensus, in ledger %d.\n" % tx_json["ledger_index"]
+        msg += "This result has been validated by consensus, in ledger %d, at %s.\n" % (
+                tx_json["ledger_index"], ledger["close_time_human"])
     else:
         msg += "This result is provisionally part of ledger %d.\n" % tx_json["ledger_index"]
         
@@ -158,6 +177,13 @@ def splain(tx_json):
                 node = wrapper["ModifiedNode"]
                 msg += "  It modified %s%s.\n" % (describe_node(node), 
                         describe_node_changes(node))
+                        
+    if "TransactionIndex" in tx_meta:
+        msg += "It was transaction #%d of %d total transactions in ledger %s.\n" % (
+                tx_meta["TransactionIndex"]+1, len(ledger["transactions"]) ,
+                #                          ^-- convert 0-based to 1-based
+                ledger["ledger_index"])
+    
     return msg
 
 
@@ -183,39 +209,42 @@ def describe_paths(pathset):
     
 def describe_node(node):
     nodetype = node["LedgerEntryType"]
+    # DeletedNode/ModifiedNode have FinalFields; CreateNode has NewFields
+    if "FinalFields" in node:
+        node_fields = node["FinalFields"]
+    elif "NewFields" in node:
+        node_fields = node["NewFields"]
+    elif "PreviousFields" in node:
+        node_fields = node["PreviousFields"]
+    else:
+        raise KeyError("affected node had no fields")
+    
     if nodetype == "Offer":
-        if "PreviousFields" in node:
-            taker_pays = node["PreviousFields"]["TakerPays"]
-            taker_gets = node["PreviousFields"]["TakerGets"]
-        elif "FinalFields" in node:
-            taker_pays = node["FinalFields"]["TakerPays"]
-            taker_gets = node["FinalFields"]["TakerGets"]
+        if "TakerPays" in node_fields and "TakerGets" in node_fields:
+            taker_pays = node_fields["TakerPays"]
+            taker_gets = node_fields["TakerGets"]            
+            return "%s's Offer to buy %s for %s" % (
+                    lookup_acct(node_fields["Account"]), 
+                    amount_to_string(taker_pays), amount_to_string(taker_gets))
         else:
-            return "%'s Offer" % lookup_acct(node["FinalFields"]["Account"])
-        return "%s's Offer to buy %s for %s" % (
-                lookup_acct(node["FinalFields"]["Account"]), 
-                amount_to_string(taker_pays), amount_to_string(taker_gets))
+            #probably shouldn't get here, but handle it gracefully
+            return "%s's Offer" % lookup_acct(node_fields["Account"])
             
     if nodetype == "RippleState":
-        if "FinalFields" in node:
-            return "the trust line between %s and %s" % (
-                    lookup_acct(node["FinalFields"]["HighLimit"]["issuer"]), 
-                    lookup_acct(node["FinalFields"]["LowLimit"]["issuer"]))
-        elif "NewFields" in node:
-            return "the trust line between %s and %s" % (
-                    lookup_acct(node["NewFields"]["HighLimit"]["issuer"]), 
-                    lookup_acct(node["NewFields"]["LowLimit"]["issuer"]))
+        return "the trust line between %s and %s" % (
+                lookup_acct(node_fields["HighLimit"]["issuer"]), 
+                lookup_acct(node_fields["LowLimit"]["issuer"]))
             
     if nodetype == "DirectoryNode":
-        if "Owner" in node["FinalFields"]:
-            return "a Directory owned by %s" % lookup_acct(node["FinalFields"]["Owner"])
-        elif "TakerPaysCurrency" in node["FinalFields"]:
+        if "Owner" in node_fields:
+            return "a Directory owned by %s" % lookup_acct(node_fields["Owner"])
+        elif "TakerPaysCurrency" in node_fields:
             return "an offer Directory"
         else:
             return "a Directory node"
             
     if nodetype == "AccountRoot":
-        return "the account %s" % lookup_acct(node["FinalFields"]["Account"])
+        return "the account %s" % lookup_acct(node_fields["Account"])
         
     #fallback, hopefully shouldn't reach here
     return "a %s node" % nodetype
@@ -359,6 +388,37 @@ def lookup_acct(address, tilde=True):
     else:
         return username
 
+
+def lookup_ledger(ledger_index=0, ledger_hash=""):
+    assert ledger_index or ledger_hash
+    
+    #You should probably not pass both, but this'll let
+    # rippled decide what to do in that case.
+    params = {
+        "transactions": True
+    }
+    if ledger_index:
+        params["ledger_index"] = ledger_index
+    if ledger_hash:
+        params["ledger_hash"] = ledger_hash
+    
+    command = {
+        "method": "ledger",
+        "params": [params]
+    }
+
+    conn = httplib.HTTPConnection(RIPPLED_HOST, RIPPLED_PORT)
+    conn.request("POST", "/", json.dumps(command))
+    response = conn.getresponse()
+
+    s = response.read()
+
+    response_json = json.loads(s.decode("utf-8"))
+    if "result" in response_json and "ledger" in response_json["result"]:
+        return response_json["result"]["ledger"]
+    else:
+        raise IOError("Response from rippled doesn't have a ledger as expected")
+    
 
 # Looking up all the ripple names takes a long time. Save that shit!
 def load_known_names(fname = PICKLE_FILE):
