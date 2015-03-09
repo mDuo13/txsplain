@@ -78,13 +78,16 @@ def dumpjson(j):
     return json.dumps(j, sort_keys=True, indent=4, separators=(',', ': '))
 
 
-def splain(tx_json):
+def splain(tx_json, verbose=True):
     msg = ""
     
     print(dumpjson(tx_json))
     msg += "\n\n"
     
-    ledger = lookup_ledger(ledger_index=tx_json["ledger_index"])
+    try:
+        ledger = lookup_ledger(ledger_index=tx_json["ledger_index"])
+    except KeyError:
+        ledger = None
     tx_type = tx_json["TransactionType"]
     
     #lookup flags now so we can phrase things accordingly
@@ -135,9 +138,11 @@ def splain(tx_json):
         validated = tx_json["validated"]
     else:
         validated = False
-    if validated:
+    if validated and ledger:
         msg += "This result has been validated by consensus, in ledger %d, at %s.\n" % (
                 tx_json["ledger_index"], ledger["close_time_human"])
+    elif validated:
+        msg += "This result has been validated by consensus, in ledger %d.\n" % (tx_json["ledger_index"])
     else:
         msg += "This result is provisionally part of ledger %d.\n" % tx_json["ledger_index"]
         
@@ -160,29 +165,32 @@ def splain(tx_json):
                 if memotype == "client":
                     msg += "A memo indicates it was sent with the client '%s'.\n" % memoformat
     
-    if "Paths" in tx_json:
+    if verbose and "Paths" in tx_json:
         msg += describe_paths(tx_json["Paths"])
     
-    if "AffectedNodes" in tx_meta:
+    if verbose and "AffectedNodes" in tx_meta:
         msg += "It affected %d nodes in the global ledger, including:\n" % len(
                 tx_meta["AffectedNodes"])
         for wrapper in tx_meta["AffectedNodes"]:
             if "DeletedNode" in wrapper:
                 node = wrapper["DeletedNode"]
-                msg += "  It deleted %s.\n" % describe_node(node)
+                msg += "..  It deleted %s.\n" % describe_node(node)
             elif "CreatedNode" in wrapper:
                 node = wrapper["CreatedNode"]
-                msg += "  It created %s.\n" % describe_node(node)
+                msg += "..  It created %s.\n" % describe_node(node)
             if "ModifiedNode" in wrapper:
                 node = wrapper["ModifiedNode"]
-                msg += "  It modified %s%s.\n" % (describe_node(node), 
+                msg += "..  It modified %s%s.\n" % (describe_node(node), 
                         describe_node_changes(node))
                         
     if "TransactionIndex" in tx_meta:
-        msg += "It was transaction #%d of %d total transactions in ledger %s.\n" % (
+        if ledger:
+            msg += "It was transaction #%d of %d total transactions in ledger %s.\n" % (
                 tx_meta["TransactionIndex"]+1, len(ledger["transactions"]) ,
                 #                          ^-- convert 0-based to 1-based
                 ledger["ledger_index"])
+        else:
+            msg += "It was transaction #%d in ledger %s.\n" % ( tx_meta["TransactionIndex"]+1, tx_json["ledger_index"] )
     
     return msg
 
@@ -202,7 +210,7 @@ def describe_paths(pathset):
             if step["type"] & PATHSTEP_RIPPLING:
                 ptext += "%s - " % lookup_acct(step["account"])
         ptext += "Destination"
-        msg += "  %s\n" % ptext
+        msg += "..  %s\n" % ptext
         
     return msg
 
@@ -354,6 +362,8 @@ def fetch(tx_hash):
     
     response_json = json.loads(s.decode("utf-8"))
     #s = json.dumps(response_json, sort_keys=True, indent=4, separators=(',', ': '))
+    if "status" in response_json and response_json["status"]=="error":
+        raise KeyError("tx not found")
     return response_json
     
 
@@ -417,7 +427,7 @@ def lookup_ledger(ledger_index=0, ledger_hash=""):
     if "result" in response_json and "ledger" in response_json["result"]:
         return response_json["result"]["ledger"]
     else:
-        raise IOError("Response from rippled doesn't have a ledger as expected")
+        raise KeyError("Response from rippled doesn't have a ledger as expected")
     
 
 # Looking up all the ripple names takes a long time. Save that shit!
