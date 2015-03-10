@@ -79,6 +79,9 @@ def dumpjson(j):
 
 
 def splain(tx_json, verbose=True):
+    global tx_parties
+    tx_parties = {} # reset this once per splain
+    
     msg = ""
     
     print(dumpjson(tx_json))
@@ -192,8 +195,19 @@ def splain(tx_json, verbose=True):
         else:
             msg += "It was transaction #%d in ledger %s.\n" % ( tx_meta["TransactionIndex"]+1, tx_json["ledger_index"] )
     
+    msg = parties() + msg
+    
     return msg
 
+
+def parties():
+    global tx_parties
+    
+    s = "Parties: \n"
+    for addr,alias in tx_parties.items():
+        s += ".. %s: %s\n" % (addr, alias)
+        
+    return s
 
 def describe_paths(pathset):
     msg = "It specified %d paths other than the default one:\n" % len(pathset)
@@ -369,9 +383,14 @@ def fetch(tx_hash):
 
 known_acts = {}
 def lookup_acct(address, tilde=True):
-    global known_acts
+    global known_acts, tx_parties
     
     if address in known_acts:
+        if "Unknown Account" not in known_acts[address]:
+            tx_parties[address] = "~"+known_acts[address]
+        else:
+            tx_parties[address] = "Unknown Account"
+            
         if tilde and "Unknown Account" not in known_acts[address]:
             return "~"+known_acts[address]
         else:
@@ -387,7 +406,9 @@ def lookup_acct(address, tilde=True):
     
     if "username" in response_json:
         username = response_json["username"]
+        tx_parties[address] = "~"+username
     else:
+        tx_parties[address] = "Unknown Account"
         username = "%s (Unknown Account)" % address
     
     # Add it to known_acts so we don't have to http again
