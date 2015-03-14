@@ -1,0 +1,2 @@
+slackclient==0.15
+
