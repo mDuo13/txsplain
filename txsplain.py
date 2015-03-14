@@ -239,7 +239,8 @@ def describe_node(node):
     elif "PreviousFields" in node:
         node_fields = node["PreviousFields"]
     else:
-        raise KeyError("affected node had no fields")
+        #weird that it has no modified/new/final fields, but ok
+        return "a %s node" % nodetype
     
     if nodetype == "Offer":
         if "TakerPays" in node_fields and "TakerGets" in node_fields:
