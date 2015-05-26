@@ -3,7 +3,7 @@
 from __future__ import print_function
 import json, sys, pickle, struct
 
-RIPPLED_HOST = "s1.ripple.com"
+RIPPLED_HOST = "s2.ripple.com"
 RIPPLED_PORT = 51234
 RIPPLE_ID_HOST = "id.ripple.com"
 RIPPLE_ID_PORT = 443
