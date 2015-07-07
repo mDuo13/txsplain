@@ -1,15 +1,18 @@
 #!/bin/env python
 
 from __future__ import print_function
-import json, sys, pickle, struct
+import json, sys, pickle, struct, re
 
-RIPPLED_HOST = "s1.ripple.com"
+# config constants -----------------------------
+
+RIPPLED_HOST = "s2.ripple.com"
 RIPPLED_PORT = 51234
 RIPPLE_ID_HOST = "id.ripple.com"
 RIPPLE_ID_PORT = 443
 PICKLE_FILE = "ripnames.pkl"
 
-FLAGS = {
+# rippled constants ----------------------------
+TX_FLAGS = {
     "*": {
         0x80000000: "tfFullyCanonicalSig"
     },
@@ -41,7 +44,30 @@ FLAGS = {
         0x00100000: "tfSetFreeze",
         0x00200000: "tfClearFreeze"
     },
-    "SetFee": {}
+    "SetFee": {},
+}
+
+LEDGER_FLAGS = {
+    "AccountRoot": {
+        0x00010000: "lsfPasswordSpent",
+        0x00020000: "lsfRequireDestTag",
+        0x00040000: "lsfRequireAuth",
+        0x00080000: "lsfDisallowXRP",
+        0x00100000: "lsfDisableMaster",
+        0x00200000: "lsfNoFreeze",
+        0x00400000: "lsfGlobalFreeze",
+        0x00800000: "lsfDefaultRipple",
+    }, 
+    "RippleState": {
+        0x00010000: "lsfLowReserve",
+        0x00020000: "lsfHighReserve",
+        0x00040000: "lsfLowAuth",
+        0x00080000: "lsfHighAuth",
+        0x00100000: "lsfLowNoRipple",
+        0x00200000: "lsfHighNoRipple",
+        0x00400000: "lsfLowFreeze",
+        0x00800000: "lsfHighFreeze",
+    }
 }
 
 PATHSTEP_RIPPLING = 0x01
@@ -50,18 +76,17 @@ PATHSTEP_ORDERBOOK = 0x10
 PATHSTEP_ISSUER = 0x20
 
 
+# Python 2/3-agnostic stuff ----------------
 if sys.version_info[:2] <= (2,7):
     import httplib
 else:
     import http.client as httplib
-
 
 def decode_hex(s):
     if sys.version_info.major < 3:
         return s.decode("hex")
     else:
         return bytes.fromhex(s).decode("utf-8")
-
     
 def is_string(s):
     if sys.version_info.major < 3:
@@ -72,12 +97,121 @@ def is_string(s):
         return True
     else:
         return False
-        
-    
+
+# basic utils -------------
 def dumpjson(j):
     return json.dumps(j, sort_keys=True, indent=4, separators=(',', ': '))
 
+# ripple utils ------------
+def amount_to_string(amount, any_if=None):
+    if is_string(amount):
+        return "%f XRP" % drops_to_xrp(amount)
+    else:
+        if any_if == amount["issuer"]:
+            # If SendMax issuer == source account, special case "use any"
+            # If Amount issuer == destination account, same
+            return "%s %s" % (amount["value"], amount["currency"])
+        else:
+            return "%s %s.%s" % (amount["value"], amount["currency"], lookup_rippleid(amount["issuer"], tilde=False))
 
+
+def is_account_address(s):
+    return re.match(
+        "r[rpshnaf39wBUDNEGHJKLM4PQRST7VWXYZ2bcdeCg65jkm8oFqi1tuvAxyz]{24,34}",
+        s.strip())
+
+def is_hash256(s):
+    return re.match("[0-9A-F]{64}", s.strip(), re.IGNORECASE)
+    
+    
+def drops_to_xrp(drops):
+    return int(drops) / 1000000.0
+
+
+def json_rpc_call(method, params={}):
+    """
+    Connect to rippled's JSON-RPC API.
+    - method: string, e.g. "account_info"
+    - params: dictionary (JSON object), 
+        e.g. {"account": "rvYAfWj5gh67oV6fW32ZzP3Aw4Eubs59B", 
+              "ledger" : "current"}
+    """
+    command = {
+        "method": method,
+        "params": [params]
+    }
+
+    conn = httplib.HTTPConnection(RIPPLED_HOST, RIPPLED_PORT)
+    conn.request("POST", "/", json.dumps(command))
+    response = conn.getresponse()
+
+    s = response.read()
+
+    response_json = json.loads(s.decode("utf-8"))
+    if "result" in response_json:
+        return response_json["result"]
+    else:
+        warn(response_json)
+        raise KeyError("Response from rippled doesn't have result as expected")
+
+def tx(tx_hash):
+    """
+    rippled tx command
+    """
+    params = {
+        "transaction": tx_hash,
+        "binary": False
+    }
+    tx = json_rpc_call("tx", params)
+
+    if "status" in tx and tx["status"]=="error":
+        raise KeyError("tx not found")
+    return tx
+
+
+def lookup_ledger(ledger_index=0, ledger_hash=""):
+    assert ledger_index or ledger_hash
+    
+    #You should probably not pass both, but this'll let
+    # rippled decide what to do in that case.
+    params = {
+        "transactions": True
+    }
+    if ledger_index:
+        params["ledger_index"] = ledger_index
+    if ledger_hash:
+        params["ledger_hash"] = ledger_hash
+    
+    result = json_rpc_call("ledger", params)
+
+    if "ledger" in result:
+        return result["ledger"]
+    else:
+        raise KeyError("Response from rippled doesn't have a ledger as expected")
+
+
+def account_info(address, ledger_index="validated"):
+    params = {
+        "account": address,
+        "ledger_index": ledger_index
+    }
+    result = json_rpc_call("account_info", params)
+    
+    if "account_data" in result:
+        return result["account_data"]
+    else:
+        warn(result)
+        raise KeyError("Response from rippled doesn't have account_data as expected")
+
+def get_reserve_constants():
+    result = json_rpc_call("server_info")
+    vl = result["info"]["validated_ledger"]
+    reserve_base = vl["reserve_base_xrp"]
+    reserve_owner = vl["reserve_inc_xrp"]
+    return reserve_base, reserve_owner
+
+# transaction splaining ------------------
+tx_parties = {}
 def splain(tx_json, verbose=True):
     global tx_parties
     tx_parties = {} # reset this once per splain
@@ -96,24 +230,24 @@ def splain(tx_json, verbose=True):
     #lookup flags now so we can phrase things accordingly
     enabled_flags = []
     if "Flags" in tx_json:
-        for flag_bit,flag_name in FLAGS["*"].items():
+        for flag_bit,flag_name in TX_FLAGS["*"].items():
             if tx_json["Flags"] & flag_bit:
                 enabled_flags.append(flag_name)
-        for flag_bit,flag_name in FLAGS[tx_type].items():
+        for flag_bit,flag_name in TX_FLAGS[tx_type].items():
             if tx_json["Flags"] & flag_bit:
                 enabled_flags.append(flag_name)
     
     if tx_type == "Payment":
-        msg += "This is a Payment from %s to %s.\n" % (lookup_acct(tx_json["Account"]),
-                lookup_acct(tx_json["Destination"]))
+        msg += "This is a Payment from %s to %s.\n" % (lookup_rippleid(tx_json["Account"]),
+                lookup_rippleid(tx_json["Destination"]))
     elif tx_type == "OfferCreate":
         if "tfSell" in enabled_flags:
             msg += "This is an OfferCreate, where %s offered to pay %s in order to receive at least %s.\n" % (
-                    lookup_acct(tx_json["Account"]), amount_to_string(tx_json["TakerGets"]),
+                    lookup_rippleid(tx_json["Account"]), amount_to_string(tx_json["TakerGets"]),
                     amount_to_string(tx_json["TakerPays"]) )
         else:
             msg += "This is an OfferCreate, where %s offered to pay up to %s in order to receive %s.\n" % (
-                    lookup_acct(tx_json["Account"]), amount_to_string(tx_json["TakerGets"]),
+                    lookup_rippleid(tx_json["Account"]), amount_to_string(tx_json["TakerGets"]),
                     amount_to_string(tx_json["TakerPays"]) )
         if "OfferSequence" in tx_json:
             msg += "Additionally, it was intended to cancel a previous offer with sequence #%d.\n" % tx_json["OfferSequence"]
@@ -121,7 +255,7 @@ def splain(tx_json, verbose=True):
         msg += "This is a SetFee pseudo-transaction.\n"
     else:
         msg += "This is a %s transaction.\n" % tx_type
-        msg += "The transaction was sent by %s.\n" % lookup_acct(tx_json["Account"])
+        msg += "The transaction was sent by %s.\n" % lookup_rippleid(tx_json["Account"])
     
     tx_meta = tx_json["meta"]#"tx-command" format
     
@@ -205,8 +339,10 @@ def parties():
     
     s = "Parties: \n"
     for addr,alias in tx_parties.items():
-        s += ".. %s: %s\n" % (addr, alias)
-        
+        if addr != alias:
+            s += ".. %s: %s\n" % (addr, alias)
+        else:
+            s += ".. %s\n"
     return s
 
 def describe_paths(pathset):
@@ -217,12 +353,12 @@ def describe_paths(pathset):
             if step["type"] & PATHSTEP_ORDERBOOK:
                 if step["type"] & PATHSTEP_ISSUER:
                     currency = "%s.%s" % (step["currency"], 
-                            lookup_acct(step["issuer"], tilde=False))
+                            lookup_rippleid(step["issuer"], tilde=False))
                 else:
                     currency = step["currency"]
                 ptext += "Orderbook:%s - " % step["currency"]
             if step["type"] & PATHSTEP_RIPPLING:
-                ptext += "%s - " % lookup_acct(step["account"])
+                ptext += "%s - " % lookup_rippleid(step["account"])
         ptext += "Destination"
         msg += "..  %s\n" % ptext
         
@@ -247,27 +383,27 @@ def describe_node(node):
             taker_pays = node_fields["TakerPays"]
             taker_gets = node_fields["TakerGets"]            
             return "%s's Offer to buy %s for %s" % (
-                    lookup_acct(node_fields["Account"]), 
+                    lookup_rippleid(node_fields["Account"]), 
                     amount_to_string(taker_pays), amount_to_string(taker_gets))
         else:
             #probably shouldn't get here, but handle it gracefully
-            return "%s's Offer" % lookup_acct(node_fields["Account"])
+            return "%s's Offer" % lookup_rippleid(node_fields["Account"])
             
     if nodetype == "RippleState":
         return "the trust line between %s and %s" % (
-                lookup_acct(node_fields["HighLimit"]["issuer"]), 
-                lookup_acct(node_fields["LowLimit"]["issuer"]))
+                lookup_rippleid(node_fields["HighLimit"]["issuer"]), 
+                lookup_rippleid(node_fields["LowLimit"]["issuer"]))
             
     if nodetype == "DirectoryNode":
         if "Owner" in node_fields:
-            return "a Directory owned by %s" % lookup_acct(node_fields["Owner"])
+            return "a Directory owned by %s" % lookup_rippleid(node_fields["Owner"])
         elif "TakerPaysCurrency" in node_fields:
             return "an offer Directory"
         else:
             return "a Directory node"
             
     if nodetype == "AccountRoot":
-        return "the account %s" % lookup_acct(node_fields["Account"])
+        return "the account %s" % lookup_rippleid(node_fields["Account"])
         
     #fallback, hopefully shouldn't reach here
     return "a %s node" % nodetype
@@ -320,17 +456,17 @@ def describe_node_changes(node):
             if perspective_low:
                 if diff > 0:
                     changes.append("increasing the amount %s holds by %f %s" % 
-                        (lookup_acct(low_node), diff, currency))
+                        (lookup_rippleid(low_node), diff, currency))
                 else:
                     changes.append("decreasing the amount %s holds by %f %s" % 
-                        (lookup_acct(low_node), -diff, currency))
+                        (lookup_rippleid(low_node), -diff, currency))
             else:
                 if diff > 0:
                     changes.append("decreasing the amount %s holds by %f %s" % 
-                        (lookup_acct(high_node), diff, currency))
+                        (lookup_rippleid(high_node), diff, currency))
                 else:
                     changes.append("increasing the amount %s holds by %f %s" % 
-                        (lookup_acct(high_node), -diff, currency))
+                        (lookup_rippleid(high_node), -diff, currency))
             
     if not changes:
         return ""
@@ -341,49 +477,73 @@ def describe_node_changes(node):
     else:
         return ", "+changes[0]
 
-    
-def amount_to_string(amount, any_if=None):
-    if is_string(amount):
-        return "%f XRP" % drops_to_xrp(amount)
+
+# account splaining -------------------------
+
+def splain_account(account):
+    address = account["Account"]
+    s = "This is account %s" % address
+    name = lookup_rippleid(address)
+    if known_acts[address] == "Unknown Account":
+        s += ", which has no Ripple Name.\n"
     else:
-        if any_if == amount["issuer"]:
-            # If SendMax issuer == source account, special case "use any"
-            # If Amount issuer == destination account, same
-            return "%s %s" % (amount["value"], amount["currency"])
-        else:
-            return "%s %s.%s" % (amount["value"], amount["currency"], lookup_acct(amount["issuer"], tilde=False))
-
+        s += ", which has Ripple Name %s.\n" % name
     
-def drops_to_xrp(drops):
-    return int(drops) / 1000000.0
+    s += "It has %f XRP.\n" % drops_to_xrp(account["Balance"])
+    s += "It owns %d objects in the ledger, which means its reserve is %d XRP.\n" % \
+            (account["OwnerCount"], calculate_reserve(account["OwnerCount"]))
 
-
-def fetch(tx_hash):
-    command = {
-        "method": "tx",
-        "params": [
-            {
-                "transaction": tx_hash,
-                "binary": False
-            }
-        ]
-    }
-
-    conn = httplib.HTTPConnection(RIPPLED_HOST, RIPPLED_PORT)
-    conn.request("POST", "/", json.dumps(command))
-    response = conn.getresponse()
+    flags = account["Flags"]
+    enabled_flags = []
+    if not flags:
+        s += "It has no flags enabled.\n"
+    else:
+        for flag_bit,flag_name in LEDGER_FLAGS["AccountRoot"].items():
+            if flags & flag_bit:
+                enabled_flags.append(flag_name)
+        s += "It has the following flags enabled: %s.\n" % \
+                ", ".join(enabled_flags)
     
-    s = response.read()
+    if "PreviousTxnLgrSeq" in account and "PreviousTxnID" in account:
+        s += "This node was last modified by Transaction %s" % account["PreviousTxnID"]
+        try:
+            previoustxn_ledger = lookup_ledger(account["PreviousTxnLgrSeq"])
+            s += " in ledger %d, on %s.\n" % (account["PreviousTxnLgrSeq"], 
+                    previoustxn_ledger["close_time_human"])
+        except KeyError:
+            s += " in ledger %d.\n" % account["PreviousTxnLgrSeq"]
+        s += "(Its trust lines might have been modified more recently.)\n"
+        
+    if "AccountTxnID" in account:
+        s += "It has AccountTxnID enabled. "
+        s += "Its most recently sent transaction is %s.\n" % account["AccountTxnID"]
     
-    response_json = json.loads(s.decode("utf-8"))
-    #s = json.dumps(response_json, sort_keys=True, indent=4, separators=(',', ': '))
-    if "status" in response_json and response_json["status"]=="error":
-        raise KeyError("tx not found")
-    return response_json
+    if "Domain" in account:
+        s += "It refers the following domain: %s\n" % decode_hex(account["Domain"])
     
+    if "urlgravatar" in account:
+        s += "Avatar: %s\n" % account["urlgravatar"]
+        
+    if "TransferRate" in account and account["TransferRate"] != 0 and \
+            account["TransferRate"] != 1000000000:
+        s += "It has a transfer fee of %f%%.\n" % \
+                calculate_transfer_fee(account["TransferRate"])
+    
+    if "MessageKey" in account:
+        s += "To send an encrypted message to this account, you should encode it with public key %s.\n" % account["MessageKey"]
+    
+    return s
 
+def calculate_transfer_fee(transfer_rate):
+    return ( (transfer_rate / 1000000000.0) - 1) * 100 #percent
+
+def calculate_reserve(owner_count):
+    reserve_base, reserve_owner = get_reserve_constants()
+    return reserve_base + (owner_count * reserve_owner)
+
+# rippleid utils ----------------------------
 known_acts = {}
-def lookup_acct(address, tilde=True):
+def lookup_rippleid(address, tilde=True):
     global known_acts, tx_parties
     
     if address in known_acts:
@@ -397,6 +557,7 @@ def lookup_acct(address, tilde=True):
         else:
             return known_acts[address]
     
+    print("looking up %s" % address)
     url = "/v1/user/%s" % address
     conn = httplib.HTTPSConnection(RIPPLE_ID_HOST, RIPPLE_ID_PORT)
     conn.request("GET", url)
@@ -420,38 +581,6 @@ def lookup_acct(address, tilde=True):
     else:
         return username
 
-
-def lookup_ledger(ledger_index=0, ledger_hash=""):
-    assert ledger_index or ledger_hash
-    
-    #You should probably not pass both, but this'll let
-    # rippled decide what to do in that case.
-    params = {
-        "transactions": True
-    }
-    if ledger_index:
-        params["ledger_index"] = ledger_index
-    if ledger_hash:
-        params["ledger_hash"] = ledger_hash
-    
-    command = {
-        "method": "ledger",
-        "params": [params]
-    }
-
-    conn = httplib.HTTPConnection(RIPPLED_HOST, RIPPLED_PORT)
-    conn.request("POST", "/", json.dumps(command))
-    response = conn.getresponse()
-
-    s = response.read()
-
-    response_json = json.loads(s.decode("utf-8"))
-    if "result" in response_json and "ledger" in response_json["result"]:
-        return response_json["result"]["ledger"]
-    else:
-        raise KeyError("Response from rippled doesn't have a ledger as expected")
-    
-
 # Looking up all the ripple names takes a long time. Save that shit!
 def load_known_names(fname = PICKLE_FILE):
     global known_acts
@@ -468,15 +597,20 @@ def save_known_names(fname = PICKLE_FILE):
         pickle.dump(known_acts, f)
 
 
+# commandline operation ------------------------------
 if __name__ == "__main__":
     if len(sys.argv) != 2:
-        exit("usage: %s tx_hash"%sys.argv[0])
+        exit("usage: %s tx_hash|account_address" % sys.argv[0])
         
     load_known_names()
     
-    tx_hash = sys.argv[1]
-    tx_json = fetch(tx_hash)["result"]
-    print(splain(tx_json))
+    arg1 = sys.argv[1]
+    if is_account_address(arg1):
+        acct_json = account_info(arg1)
+        print(splain_account(acct_json))
+    elif is_hash256(arg1):
+        tx_json = tx(arg1)
+        print(splain(tx_json))
     
     save_known_names()
     

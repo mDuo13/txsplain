@@ -12,7 +12,6 @@ TXSPLAIN
 * Describe changes to affected nodes in transaction metadata.
 * Detect and read Ripple Trade client IDs from `Memos` field.
 
-
 Example usage:
 ---------------
 ```
@@ -141,4 +140,31 @@ It affected 102 nodes in the global ledger, including:
   It modified the account ~donPewoqu, decreasing its XRP balance by 26905.298534.
   It modified the trust line between ~donPewoqu and ~tokyojpy, increasing the amount ~donPewoqu holds by 51019.525291 JPY.
   It modified the account ~GoldsmithX, decreasing its XRP balance by 23349.000000.
+```
+
+Account Lookup
+--------------
+
+txsplain can also be used to look up accounts. (This feature is not built into the Slackbot yet.) This includes:
+
+* Ripple Name lookup
+* Calculating the account's total reserve requirement
+* Parsing any account flags currently enabled
+* Explaining the other fields of the AccountRoot object
+
+Example:
+
+```
+$ ./txsplain.py rf1BiGeXwwQoi8Z2ueFYTEXSwuJYfV2Jpn
+This is account rf1BiGeXwwQoi8Z2ueFYTEXSwuJYfV2Jpn, which has Ripple Name ~Reginelli.
+It has 148.446663 XRP.
+It owns 3 objects in the ledger, which means its reserve is 35 XRP.
+It has the following flags enabled: lsfDefaultRipple.
+This node was last modified by Transaction 0D5FB50FA65C9FE1538FD7E398FFFE9D1908DFA4576D8D7A020040686F93C77D in ledger 14091160, on 2015-Jun-16 21:32:40.
+(Its trust lines might have been modified more recently.)
+It has AccountTxnID enabled. Its most recently sent transaction is 0D5FB50FA65C9FE1538FD7E398FFFE9D1908DFA4576D8D7A020040686F93C77D.
+It refers the following domain: mduo13.com
+Avatar: http://www.gravatar.com/avatar/98b4375e1d753e5b91627516f6d70977
+It has a transfer fee of 0.500000%.
+To send an encrypted message to this account, you should encode it with public key 0000000000000000000000070000000300.
 ```
