@@ -59,8 +59,9 @@ LEDGER_FLAGS = {
         0x00800000: "lsfDefaultRipple",
     }, 
     "RippleState": {
-        0x00010000: "lsfLowReserve",
-        0x00020000: "lsfHighReserve",
+##      Reserve flags aren't set manually, so we check them specially
+#        0x00010000: "lsfLowReserve",
+#        0x00020000: "lsfHighReserve",
         0x00040000: "lsfLowAuth",
         0x00080000: "lsfHighAuth",
         0x00100000: "lsfLowNoRipple",
@@ -117,15 +118,20 @@ def amount_to_string(amount, any_if=None):
 
 def is_account_address(s):
     return re.match(
-        "r[rpshnaf39wBUDNEGHJKLM4PQRST7VWXYZ2bcdeCg65jkm8oFqi1tuvAxyz]{24,34}",
+        "^r[rpshnaf39wBUDNEGHJKLM4PQRST7VWXYZ2bcdeCg65jkm8oFqi1tuvAxyz]{24,34}$",
         s.strip())
 
 def is_hash256(s):
-    return re.match("[0-9A-F]{64}", s.strip(), re.IGNORECASE)
+    return re.match("^[0-9A-F]{64}$", s.strip(), re.IGNORECASE)
     
+def is_currency_code(s):
+    return re.match("^[A-Z0-9]{3}$|^[0-9A-F]{40}$", s.strip())
     
 def drops_to_xrp(drops):
     return int(drops) / 1000000.0
+    
+def quality_to_percent(quality):
+    return quality / 10000000.0
 
 
 def json_rpc_call(method, params={}):
@@ -209,6 +215,21 @@ def get_reserve_constants():
     reserve_base = vl["reserve_base_xrp"]
     reserve_owner = vl["reserve_inc_xrp"]
     return reserve_base, reserve_owner
+    
+def lookup_trustline(address1, address2, currency, ledger_index="validated"):
+    params = {
+        "ripple_state": {
+            "accounts": [address1, address2],
+            "currency": currency
+        },
+        "ledger_index": ledger_index
+    }
+    result = json_rpc_call("ledger_entry", params)
+    
+    if "node" in result:
+        return result["node"]
+    else:
+        raise KeyError("Response from rippled doesn't have the node as expected")
 
 # transaction splaining ------------------
 tx_parties = {}
@@ -535,11 +556,82 @@ def splain_account(account):
     return s
 
 def calculate_transfer_fee(transfer_rate):
-    return ( (transfer_rate / 1000000000.0) - 1) * 100 #percent
+    return ( (quality / 1000000000.0) - 1) * 100 #percent
 
 def calculate_reserve(owner_count):
     reserve_base, reserve_owner = get_reserve_constants()
     return reserve_base + (owner_count * reserve_owner)
+    
+# trust line splaining----------------------------------------
+
+def splain_trust_line(trustline):
+    currency = trustline["Balance"]["currency"]
+    balance = trustline["Balance"]["value"]
+    lownode = trustline["LowLimit"]["issuer"]
+    highnode = trustline["HighLimit"]["issuer"]
+    lowlimit = trustline["LowLimit"]["value"]
+    highlimit = trustline["HighLimit"]["value"]
+    lowname = lookup_rippleid(lownode)
+    highname = lookup_rippleid(highnode)
+    
+    s = "This is a %s trust line between %s and %s.\n" % (currency, lowname, highname)
+    s += "%s is considered the low node, and %s is considered the high node.\n" % (lowname, highname)
+    if float(balance) < 0:
+        #the low node owes money to the high node
+        s += "%s currently possesses %f %s issued by %s, out of a limit of %s %s.\n" % (highname, 
+                -float(balance), currency, lowname, highlimit, currency)
+        s += "%s is willing to hold up to %s %s on this trust line.\n" % (lowname, 
+            lowlimit, currency)
+    else:
+        s += "%s currently possesses %s %s issued by %s, out of a limit of %s %s.\n" % (lowname, 
+                balance, currency, highname, lowlimit, currency)
+        s += "%s is willing to hold up to %s %s on this trust line.\n" % (highname, 
+            highlimit, currency)
+    
+    
+    flags = trustline["Flags"]
+    low_enabled_flags = []
+    high_enabled_flags = []
+    for flag_bit,flag_name in LEDGER_FLAGS["RippleState"].items():
+        if flags & flag_bit:
+            if "Low" in flag_name:
+                low_enabled_flags.append(flag_name)
+            elif "High" in flag_name:
+                high_enabled_flags.append(flag_name)
+            else:
+                warn("Unrecognized flag: %s" % flag_name)
+    if low_enabled_flags:
+        s += "%s has enabled the following flags: %s.\n" % ( lowname,
+                ", ".join(low_enabled_flags) )
+    else:
+        s += "%s has not enabled any flags for this trust line.\n" % lowname
+    if high_enabled_flags:
+        s += "%s has enabled following flags: %s.\n" % ( highname,
+                ", ".join(high_enabled_flags) )
+    else:
+        s += "%s has not enabled any flags for this trust line.\n" % highname
+    
+    lsfLowReserve = 0x00010000
+    lsfHighReserve = 0x00020000
+    if flags & lsfLowReserve:
+        s += "This trust line contributes to %s's owner reserve.\n" % lowname
+    if flags & lsfHighReserve:
+        s += "This trust line contributes to %s's owner reserve.\n" % highname
+    
+    if "LowQualityIn" in trustline:
+        s += "%s values incoming amounts on this trust line at %f%% of face value.\n" % (
+                lowname, quality_to_percent(trustline["LowQualityIn"]) )
+    if "LowQualityOut" in trustline:
+        s += "%s values outgoing amounts on this trust line at %f%% of face value.\n" % (
+                lowname, quality_to_percent(trustline["LowQualityOut"]) )
+    if "HighQualityIn" in trustline:
+        s += "%s values incoming amounts on this trust line at %f%% of face value.\n" % (
+                highname, quality_to_percent(trustline["HighQualityIn"]) )
+    if "HighQualityOut" in trustline:
+        s += "%s values outgoing amounts on this trust line at %f%% of face value.\n" % (
+                highname, quality_to_percent(trustline["HighQualityOut"]) )
+    
+    return s
 
 # rippleid utils ----------------------------
 known_acts = {}
@@ -557,7 +649,7 @@ def lookup_rippleid(address, tilde=True):
         else:
             return known_acts[address]
     
-    print("looking up %s" % address)
+    #print("looking up %s" % address)
     url = "/v1/user/%s" % address
     conn = httplib.HTTPSConnection(RIPPLE_ID_HOST, RIPPLE_ID_PORT)
     conn.request("GET", url)
@@ -599,19 +691,34 @@ def save_known_names(fname = PICKLE_FILE):
 
 # commandline operation ------------------------------
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        exit("usage: %s tx_hash|account_address" % sys.argv[0])
+    USAGE_MESSAGE = "usage: %s tx_hash|account_address [address2] [currency]" % sys.argv[0]
+
+    if len(sys.argv) != 2 and len(sys.argv) != 4:
+        exit(USAGE_MESSAGE)
         
-    load_known_names()
+    if len(sys.argv) == 2:
     
-    arg1 = sys.argv[1]
-    if is_account_address(arg1):
-        acct_json = account_info(arg1)
-        print(splain_account(acct_json))
-    elif is_hash256(arg1):
-        tx_json = tx(arg1)
-        print(splain(tx_json))
+        load_known_names()
+        
+        arg1 = sys.argv[1]
+        if is_account_address(arg1):
+            acct_json = account_info(arg1)
+            print(splain_account(acct_json))
+        elif is_hash256(arg1):
+            tx_json = tx(arg1)
+            print(splain(tx_json))
+        else:
+            exit(USAGE_MESSAGE)
+        
+        save_known_names()
     
-    save_known_names()
-    
-    
+    if len(sys.argv) == 4:
+        load_known_names()
+        
+        if is_account_address(sys.argv[1]) and is_account_address(sys.argv[2]) and is_currency_code(sys.argv[3]):
+            trustline = lookup_trustline(sys.argv[1], sys.argv[2], sys.argv[3])
+            print(splain_trust_line(trustline))
+        else:
+            exit(USAGE_MESSAGE)
+            
+        save_known_names()

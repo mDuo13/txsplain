@@ -168,3 +168,26 @@ Avatar: http://www.gravatar.com/avatar/98b4375e1d753e5b91627516f6d70977
 It has a transfer fee of 0.500000%.
 To send an encrypted message to this account, you should encode it with public key 0000000000000000000000070000000300.
 ```
+
+Trust Line Lookup
+-----------------
+
+txsplain can be used to look up trust line ledger nodes. (This feature is also not in the Slackbot yet.) This includes:
+
+* Ripple Name lookup
+* Identifying high and low nodes and describing the balance appropriately.
+* Parsing RippleState flags
+* Parsing trust line quality settings
+
+Example:
+
+```
+$ ./txsplain.py rf1BiGeXwwQoi8Z2ueFYTEXSwuJYfV2Jpn rsA2LpzuawewSBQXkiju3YQTMzW13pAAdW USD
+This is a USD trust line between ~mDuo14 and ~Reginelli.
+~mDuo14 is considered the low node, and ~Reginelli is considered the high node.
+~Reginelli currently possesses 10.000000 USD issued by ~mDuo14, out of a limit of 110 USD.
+~mDuo14 is willing to hold up to 0 USD on this trust line.
+~mDuo14 has enabled the following flags: lsfLowAuth.
+~Reginelli has not enabled any flags for this trust line.
+This trust line contributes to ~Reginelli's owner reserve.
+```
