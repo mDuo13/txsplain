@@ -2,4 +2,4 @@
 ripnames.pkl
 __pycache__
 run_bot.sh
-
+*.pyc
