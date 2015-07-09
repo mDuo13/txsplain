@@ -2,6 +2,7 @@
 
 from __future__ import print_function
 import json, sys, pickle, struct, re
+from datetime import datetime
 
 # config constants -----------------------------
 
@@ -68,6 +69,10 @@ LEDGER_FLAGS = {
         0x00200000: "lsfHighNoRipple",
         0x00400000: "lsfLowFreeze",
         0x00800000: "lsfHighFreeze",
+    },
+    "Offer": {
+        0x00010000: "lsfPassive",
+        0x00020000: "lsfSell"
     }
 }
 
@@ -76,6 +81,7 @@ PATHSTEP_REDEEMING = 0x02
 PATHSTEP_ORDERBOOK = 0x10
 PATHSTEP_ISSUER = 0x20
 
+RIPPLE_EPOCH = 946684800#2000-01-01T00:00:00 UTC
 
 # Python 2/3-agnostic stuff ----------------
 if sys.version_info[:2] <= (2,7):
@@ -97,6 +103,15 @@ def is_string(s):
     elif type(s) == str:
         return True
     else:
+        return False
+
+def is_uint(s):
+    try:
+        if int(s) >= 0:
+            return True
+        else:
+            return False
+    except:
         return False
 
 # basic utils -------------
@@ -132,6 +147,10 @@ def drops_to_xrp(drops):
     
 def quality_to_percent(quality):
     return quality / 10000000.0
+
+def ripple_time_to_human(seconds):
+    return datetime.utcfromtimestamp(seconds+RIPPLE_EPOCH).isoformat()+"Z"
+    # Don't try this in 32-bit ints --------^
 
 
 def json_rpc_call(method, params={}):
@@ -221,6 +240,21 @@ def lookup_trustline(address1, address2, currency, ledger_index="validated"):
         "ripple_state": {
             "accounts": [address1, address2],
             "currency": currency
+        },
+        "ledger_index": ledger_index
+    }
+    result = json_rpc_call("ledger_entry", params)
+    
+    if "node" in result:
+        return result["node"]
+    else:
+        raise KeyError("Response from rippled doesn't have the node as expected")
+
+def lookup_offer(address, seq, ledger_index="validated"):
+    params = {
+        "offer": {
+            "account": address,
+            "seq": seq
         },
         "ledger_index": ledger_index
     }
@@ -631,6 +665,62 @@ def splain_trust_line(trustline):
         s += "%s values outgoing amounts on this trust line at %f%% of face value.\n" % (
                 highname, quality_to_percent(trustline["HighQualityOut"]) )
     
+    if "LowNode" in trustline and is_uint(trustline["LowNode"]):
+        s += "This node is listed in page %d of %s's owner directory.\n" % (
+                int(trustline["LowNode"]),
+                lowname)
+    if "HighNode" in trustline and is_uint(trustline["HighNode"]):
+        s += "This node is listed in page %d of %s's owner directory.\n" % (
+                int(trustline["HighNode"]),
+                highname)
+    
+    return s
+
+# offer splaining ---------------------------
+
+def splain_offer(offer):
+    owner = lookup_rippleid(offer["Account"])
+
+    enabled_flags = []
+    for flag_bit,flag_name in LEDGER_FLAGS["Offer"].items():
+        if offer["Flags"] & flag_bit:
+            enabled_flags.append(flag_name)
+    if "lsfSell" in enabled_flags:
+        s = "This is an Offer (#%d) from %s to pay %s in order to receive at least %s.\n" % (
+                    offer["Sequence"],
+                    owner,
+                    amount_to_string(offer["TakerGets"]),
+                    amount_to_string(offer["TakerPays"]) )
+    else:
+        s = "This is an Offer (#%d) from %s to pay up to %s in order to receive %s.\n" % (
+                    offer["Sequence"],
+                    owner,
+                    amount_to_string(offer["TakerGets"]),
+                    amount_to_string(offer["TakerPays"]) )
+    if enabled_flags:
+        s += "It has the following flags enabled: %s.\n" % \
+                ", ".join(enabled_flags)
+    else:
+        s += "It has no flags enabled.\n"
+    
+    if "OwnerNode" in offer and is_uint(offer["OwnerNode"]):
+        s += "This offer is listed in page %d of %s's owner directory.\n" % (
+                int(offer["OwnerNode"]),
+                owner)
+    if "BookDirectory" in offer:
+        if "BookNode" in offer and is_uint(offer["BookNode"]):
+            s += "This offer is listed in page %d of Offer Directory %s.\n" % (
+                    int(offer["BookNode"]), offer["BookDirectory"])
+        else:
+            s += "This offer is listed in Offer Directory %s.\n" % offer["BookDirectory"]
+    
+    validated_ledger = lookup_ledger(ledger_index="validated")
+    if "Expiration" in offer:
+        if validated_ledger["close_time"] > offer["Expiration"]:
+            s += "This offer has passed its expiration time of %s.\n" % ripple_time_to_human(offer["Expiration"])
+        else:
+            s += "This offer will expire if not claimed before a ledger closes with time > %s.\n" % ripple_time_to_human(offer["Expiration"])
+
     return s
 
 # rippleid utils ----------------------------
@@ -691,12 +781,13 @@ def save_known_names(fname = PICKLE_FILE):
 
 # commandline operation ------------------------------
 if __name__ == "__main__":
-    USAGE_MESSAGE = "usage: %s tx_hash|account_address [address2] [currency]" % sys.argv[0]
+    USAGE_MESSAGE = "Proper usage:\nGet transaction:\n  %s tx_hash\nGet account:\n  %s account_address\nGet trust line:\n  %s address1 address2 currency\nGet order:\n  %s account_address order_sequence" % ((sys.argv[0],)*4)
 
-    if len(sys.argv) != 2 and len(sys.argv) != 4:
+    if len(sys.argv) <2 or len(sys.argv)>4:
         exit(USAGE_MESSAGE)
         
     if len(sys.argv) == 2:
+        #either a tx hash or an account address
     
         load_known_names()
         
@@ -712,7 +803,20 @@ if __name__ == "__main__":
         
         save_known_names()
     
+    if len(sys.argv) == 3:
+        #address + seq = offer
+        
+        load_known_names()
+        
+        if is_account_address(sys.argv[1]) and is_uint(sys.argv[2]):
+            offer = lookup_offer(sys.argv[1], int(sys.argv[2]))
+            print(splain_offer(offer))
+        else:
+            exit(USAGE_MESSAGE)
+    
     if len(sys.argv) == 4:
+        # address1 + address2 + currency = trust line
+        
         load_known_names()
         
         if is_account_address(sys.argv[1]) and is_account_address(sys.argv[2]) and is_currency_code(sys.argv[3]):
