@@ -201,3 +201,22 @@ This is a USD trust line between ~mDuo14 and ~Reginelli.
 ~Reginelli has not enabled any flags for this trust line.
 This trust line contributes to ~Reginelli's owner reserve.
 ```
+
+Offer Lookup
+------------
+
+txsplain can be used to look up Offer nodes in the ledger. (This feature is also not in the Slackbot yet.) This includes:
+
+* Ripple name lookup
+* Parsing flags
+* Checking expiration status
+
+Example:
+
+```
+$ ./txsplain.py ra5nK24KXen9AHvsdFTKHSANinZseWnPcX 14
+This is an Offer (#14) from ~mDuo13 to pay up to 0.000001 XRP in order to receive 0.000001 BTC.SnapSwap.
+It has no flags enabled.
+This offer is listed in page 0 of ~mDuo13's owner directory.
+This offer is listed in page 0 of Offer Directory 296F4ED974D3B2487F0AB759EAD2E62E51258BDC1C73D8AB4F038D7EA4C68000.
+```
