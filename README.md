@@ -147,12 +147,12 @@ Account Lookup
 
 txsplain can also be used to look up accounts. (This feature is not built into the Slackbot yet.) This includes:
 
-* Ripple Name lookup
+* Look up account by Ripple name or by address
 * Calculating the account's total reserve requirement
 * Parsing any account flags currently enabled
 * Explaining the other fields of the AccountRoot object
 
-Example:
+Examples:
 
 ```
 $ ./txsplain.py rf1BiGeXwwQoi8Z2ueFYTEXSwuJYfV2Jpn
@@ -167,6 +167,16 @@ It refers the following domain: mduo13.com
 Avatar: http://www.gravatar.com/avatar/98b4375e1d753e5b91627516f6d70977
 It has a transfer fee of 0.500000%.
 To send an encrypted message to this account, you should encode it with public key 0000000000000000000000070000000300.
+```
+
+```
+$ ./txsplain.py ~mDuo13
+This is account ra5nK24KXen9AHvsdFTKHSANinZseWnPcX, which has Ripple Name ~mDuo13.
+It has 739.704153 XRP.
+It owns 5 objects in the ledger, which means its reserve is 45 XRP.
+It has no flags enabled.
+This node was last modified by Transaction 68D465A2957E204F11ADE381E0852012E68359C2D235B6A835B3E6CAD83928B6 in ledger 14401830, on 2015-Jul-03 00:03:10.
+(Its trust lines might have been modified more recently.)
 ```
 
 Trust Line Lookup

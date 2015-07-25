@@ -2,6 +2,7 @@
 
 from __future__ import print_function
 import json, sys, pickle, struct, re
+from warnings import warn
 
 # config constants -----------------------------
 
@@ -121,6 +122,9 @@ def is_account_address(s):
         "^r[rpshnaf39wBUDNEGHJKLM4PQRST7VWXYZ2bcdeCg65jkm8oFqi1tuvAxyz]{24,34}$",
         s.strip())
 
+def is_ripple_name(s):
+    return re.match("~[0-9A-Za-z]{3,20}", s.strip())
+
 def is_hash256(s):
     return re.match("^[0-9A-F]{64}$", s.strip(), re.IGNORECASE)
     
@@ -206,7 +210,7 @@ def account_info(address, ledger_index="validated"):
     if "account_data" in result:
         return result["account_data"]
     else:
-        warn(result)
+        warn(str(result))
         raise KeyError("Response from rippled doesn't have account_data as expected")
 
 def get_reserve_constants():
@@ -332,7 +336,11 @@ def splain(tx_json, verbose=True):
         for wrapper in tx_meta["AffectedNodes"]:
             if "DeletedNode" in wrapper:
                 node = wrapper["DeletedNode"]
-                msg += "..  It deleted %s.\n" % describe_node(node)
+                if node["LedgerEntryType"] == "Offer" and "PreviousFields" in node:
+                    #If the offer is deleted for being unfunded or canceled, there are no PreviousFields
+                    msg += "..  It consumed %s.\n" % describe_node(node)
+                else:
+                    msg += "..  It deleted %s.\n" % describe_node(node)
             elif "CreatedNode" in wrapper:
                 node = wrapper["CreatedNode"]
                 msg += "..  It created %s.\n" % describe_node(node)
@@ -389,26 +397,40 @@ def describe_paths(pathset):
 def describe_node(node):
     nodetype = node["LedgerEntryType"]
     # DeletedNode/ModifiedNode have FinalFields; CreateNode has NewFields
+    new_fields = {}
+    prev_fields = {}
+    final_fields = {}
+    node_fields = {}
+    if "NewFields" in node:
+        node_fields = node["NewFields"]
+        new_fields = node["NewFields"]
+    if "PreviousFields" in node:
+        node_fields = node["PreviousFields"]
+        prev_fields = node["PreviousFields"]
     if "FinalFields" in node:
         node_fields = node["FinalFields"]
-    elif "NewFields" in node:
-        node_fields = node["NewFields"]
-    elif "PreviousFields" in node:
-        node_fields = node["PreviousFields"]
-    else:
-        #weird that it has no modified/new/final fields, but ok
-        return "a %s node" % nodetype
+        final_fields = node["FinalFields"]
     
     if nodetype == "Offer":
-        if "TakerPays" in node_fields and "TakerGets" in node_fields:
-            taker_pays = node_fields["TakerPays"]
-            taker_gets = node_fields["TakerGets"]            
-            return "%s's Offer to buy %s for %s" % (
-                    lookup_rippleid(node_fields["Account"]), 
-                    amount_to_string(taker_pays), amount_to_string(taker_gets))
+        #prefer Prev fields if possible, since that better indicates the status of consumed offers
+        if "TakerPays" in prev_fields and "TakerGets" in prev_fields:
+            taker_pays = prev_fields["TakerPays"]
+            taker_gets = prev_fields["TakerGets"]
+        elif "TakerPays" in new_fields and "TakerGets" in new_fields:
+            taker_pays = new_fields["TakerPays"]
+            taker_gets = new_fields["TakerGets"]
+        elif "TakerPays" in final_fields and "TakerGets" in final_fields:
+            taker_pays = final_fields["TakerPays"]
+            taker_gets = final_fields["TakerGets"]
         else:
             #probably shouldn't get here, but handle it gracefully
             return "%s's Offer" % lookup_rippleid(node_fields["Account"])
+
+        return "%s's Offer (seq#%s) to buy %s for %s" % (
+                    lookup_rippleid(node_fields["Account"]),
+                    node_fields["Sequence"],
+                    amount_to_string(taker_pays), amount_to_string(taker_gets))
+
             
     if nodetype == "RippleState":
         return "the trust line between %s and %s" % (
@@ -556,7 +578,7 @@ def splain_account(account):
     return s
 
 def calculate_transfer_fee(transfer_rate):
-    return ( (quality / 1000000000.0) - 1) * 100 #percent
+    return ( (transfer_rate / 1000000000.0) - 1) * 100 #percent
 
 def calculate_reserve(owner_count):
     reserve_base, reserve_owner = get_reserve_constants()
@@ -673,6 +695,42 @@ def lookup_rippleid(address, tilde=True):
     else:
         return username
 
+def lookup_ripple_address(name):
+    global known_acts
+    #strip leading tilde
+    if name[0] == "~":
+        name = name[1:]
+    
+    def inverse_lookup(needle, haystack):
+        for key,value in haystack.items():
+            if value == needle:
+                return key
+
+        raise KeyError
+    
+    try:
+        address = inverse_lookup(name, known_acts)
+        return address
+    except KeyError:
+        pass #gonna have to look it up below
+    
+    
+    #print("looking up %s" % name)
+    url = "/v1/user/%s" % name
+    conn = httplib.HTTPSConnection(RIPPLE_ID_HOST, RIPPLE_ID_PORT)
+    conn.request("GET", url)
+    response = conn.getresponse()
+    
+    s = response.read()
+    response_json = json.loads(s.decode("utf-8"))
+    
+    if "address" in response_json:
+        address = response_json["address"]
+        known_acts[address] = name
+        return address
+    else:
+        raise KeyError
+
 # Looking up all the ripple names takes a long time. Save that shit!
 def load_known_names(fname = PICKLE_FILE):
     global known_acts
@@ -707,6 +765,15 @@ if __name__ == "__main__":
         elif is_hash256(arg1):
             tx_json = tx(arg1)
             print(splain(tx_json))
+        elif is_ripple_name(arg1):
+            try:
+                address = lookup_ripple_address(arg1)
+            except KeyError:
+                print("Ripple Name %s not found." % arg1)
+                exit()
+                
+            acct_json = account_info(address)
+            print(splain_account(acct_json))
         else:
             exit(USAGE_MESSAGE)
         
