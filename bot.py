@@ -21,12 +21,12 @@ def activates_bot(msg):
 
 def tx_lookup(tx_hash, verbose):
     try:
-        tx_json = txsplain.fetch(tx_hash)["result"]
+        tx_json = txsplain.tx(tx_hash)["result"]
         s = "https://api.ripple.com/v1/transactions/"+tx_hash+"\n"
         s += txsplain.splain(tx_json, verbose)
     except KeyError:
         s = "Couldn't find transaction %s." % tx_hash
-        
+
     return s
 
 while True:
