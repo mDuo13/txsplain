@@ -48,6 +48,19 @@ TX_FLAGS = {
         0x00200000: "tfClearFreeze"
     },
     "SetFee": {},
+    "EnableAmendment": {
+        0x00010000: "tfGotMajority",
+        0x00020000: "tfLostMajority",
+    },
+    "EscrowCancel": {},
+    "EscrowCreate": {},
+    "EscrowFinish": {},
+    "PaymentChannelClaim": {
+        0x00010000: "tfRenew",
+        0x00020000: "tfClose"
+    },
+    "PaymentChannelCreate": {},
+    "PaymentChannelFund": {}
 }
 
 LEDGER_FLAGS = {
@@ -76,6 +89,23 @@ LEDGER_FLAGS = {
         0x00010000: "lsfPassive",
         0x00020000: "lsfSell"
     }
+}
+
+AMENDMENTS = {
+    "1562511F573A19AE9BD103B5D6B9E01B3B46805AEC5D3C4805C902B514399146": "CryptoConditions",
+    "07D43DCE529B15A10827E5E04943B496762F9A88E3268269D69C44BE49E21104": "Escrow",
+    "42426C4D4F1009EE67080A9B7965B44656D7714D104A72F9B4369F97ABF044EE": "FeeEscalation",
+    "E2E6F2866106419B88C50045ACE96368558C345566AC8F2BDF5A5B5587F0E6FA": "fix1368",
+    "740352F2412A9909880C23A559FCECEDA3BE2126FED62FC7660D628A06927F11": "Flow",
+    "5CC22CFF2864B020BD79E0E1F048F63EF3594F95E650E43B3F837EF1DF5F4B26": "FlowV2",
+    "4C97EBA926031A7CF7D7B36FDE3ED66DDA5421192D63DE53FFB46E43B9DC8373": "MultiSign",
+    "9178256A980A86CF3D70D0260A7DA6402AAFE43632FDBCB88037978404188871": "OwnerPaysFee",
+    "08DE7D96082187F6E6578530258C77FAABABE4C20474BDB82F04B021F1A68647": "PayChan",
+    "C6970A8B603D8778783B61C0D445C23D1633CCFAEF0D43E7DBCD1521D34BD7C3": "SHAMapV2",
+    "DA1BD556B42D85EA9C84066D028D355B52416734D3283F85E216EA5DA6DB7E13": "SusPay",
+    "C1B8D934087225F509BEB5A8EC24447854713EE447D277F69545ABFA0E0FD490": "Tickets",
+    "532651B4FD58DF8922A49BA101AB3E996E5BFBF95A913B3E392504863E63B164": "TickSize",
+    "6781F8368C4771B83E8B821D88F580202BCB4228075297B19E4FDC5233F1EFDC": "TrustSetAuth",
 }
 
 PATHSTEP_RIPPLING = 0x01
@@ -199,13 +229,14 @@ def tx(tx_hash):
     return tx
 
 
-def lookup_ledger(ledger_index=0, ledger_hash=""):
+def lookup_ledger(ledger_index=0, ledger_hash="", expand=False):
     assert ledger_index or ledger_hash
 
     #You should probably not pass both, but this'll let
     # rippled decide what to do in that case.
     params = {
-        "transactions": True
+        "transactions": True,
+        "expand": expand
     }
     if ledger_index:
         params["ledger_index"] = ledger_index
@@ -311,11 +342,51 @@ def splain(tx_json, verbose=True):
                     amount_to_string(tx_json["TakerPays"]) )
         if "OfferSequence" in tx_json:
             msg += "Additionally, it was intended to cancel a previous offer with sequence #%d.\n" % tx_json["OfferSequence"]
+    elif tx_type == "EscrowCreate":
+        msg += "This is an EscrowCreate transaction, where %s attempted to create a held payment of %s to %s.\n" % (
+                lookup_rippleid(tx_json["Account"]),
+                amount_to_string(tx_json["Amount"]),
+                lookup_rippleid(tx_json["Destination"]), )
+        if "CancelAfter" in tx_json:
+            msg += "The held payment expires at %s.\n" % (
+                    ripple_time_to_human(tx_json["CancelAfter"]))
+        if "FinishAfter" in tx_json:
+            msg += "The payment is held until %s.\n" % (
+                    ripple_time_to_human(tx_json["FinishAfter"]))
+        if "Condition" in tx_json:
+            msg += "The held payment is contingent on a crypto-condition.\n"
+    elif tx_type == "PaymentChannelCreate":
+        msg += "This is an PaymentChannelCreate transaction, where %s attempted to create a payment channel to %s with %s.\n" % (
+                lookup_rippleid(tx_json["Account"]),
+                lookup_rippleid(tx_json["Destination"]),
+                lookup_rippleid(tx_json["Amount"]))
+        msg += "The SettleDelay before this channel be closed is %s seconds." % (
+                tx_json["SettleDelay"])
+        if "CancelAfter" in tx_json:
+            msg += "The channel expires at %s.\n" % (
+                    ripple_time_to_human(tx_json["CancelAfter"]))
     elif tx_type == "SetFee":
         msg += "This is a SetFee pseudo-transaction.\n"
+    elif tx_type == "EnableAmendment":
+        msg += "This is an EnableAmendment pseudo-transaction for %s.\n" % (
+                    AMENDMENTS.get(tx_json["Amendment"], "an unknown Amendment"))
+    elif tx_type == "EscrowFinish":
+        msg += ("This is an EscrowFinish transaction, sent by %s, to execute "+ 
+                "the held payment created by %s's transaction with sequence "+
+                "number %s.\n") % (lookup_rippleid(tx_json["Account"]),
+                    lookup_rippleid(tx_json["Owner"]),
+                    tx_json["OfferSequence"] )
+        if "Fulfillment" in tx_json:
+            msg += "It specified the fulfillment %s.\n" % tx_json["Fulfillment"]
     else:
         msg += "This is a %s transaction.\n" % tx_type
         msg += "The transaction was sent by %s.\n" % lookup_rippleid(tx_json["Account"])
+
+    if "DestinationTag" in tx_json:
+        msg += "The transaction specified the Destination Tag %s.\n" % tx_json["DestinationTag"]
+
+    if "SourceTag" in tx_json:
+        msg += "The transaction specified the Source Tag %s.\n" % tx_json["SourceTag"]
 
     tx_meta = tx_json["meta"]#"tx-command" format
 
